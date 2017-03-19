@@ -7,11 +7,11 @@ import android.content.IntentFilter
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.wifi.WifiManager
-import android.os.Binder
-import android.os.IBinder
-import android.os.PowerManager
+import android.os.*
 import android.support.v4.media.MediaMetadataCompat
+import android.widget.Toast
 import music.kifio.R
+import music.kifio.models.SearchResult
 import music.kifio.receivers.NoisyReceiver
 import music.kifio.utils.parseClientId
 import java.io.IOException
@@ -36,13 +36,11 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
         private val VOLUME_NORMAL = 1.0f
 
         val ACTION_PLAY = "music.kifio.media.ACTION_PLAY"
-        val ACTION_PAUSE = "music.kifio.media.ACTION_PAUSE"
-        val ACTION_RESUME = "music.kifio.media.ACTION_RESUME"
-        val ACTION_SEEK_TO = "music.kifio.media.ACTION_SEEK_TO"
-
-        val ACTION_SET_POSITION = "music.kifio.media.ACTION_SET_POSITION"
-        val ACTION_DISABLE_CONTROLS = "music.kifio.media.ACTION_DISABLE_CONTROLS"
-        val ACTION_ENABLE_CONTROLS = "music.kifio.media.ACTION_ENABLE_CONTROLS"
+        val UPDATE_PROGRESS = 0
+        val ENABLE_CONTROLS = 1
+        val DISABLE_CONTROLS = 2
+        val EXTRA_MEDIA = "music.kifio.media.EXTRA_MEDIA"
+        val EXTRA_MAX_PROGRESS = "music.kifio.media.EXTRA_MAX_PROGRESS"
 
     }
 
@@ -64,8 +62,12 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
 
     private var mTimeDelta = 0L
 
+    private var mUiUpdateHandler: Handler? = null
+
+    private var mMaxProgress = 1
+
     private val mUpdateProgressTask = Runnable {
-        sendBroadcast(Intent().setAction(ACTION_SET_POSITION).putExtra("position", mCurrentPosition++))
+        mUiUpdateHandler!!.obtainMessage(UPDATE_PROGRESS, mCurrentPosition++).sendToTarget()
     }
 
     override fun onCreate() {
@@ -74,11 +76,15 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
         // AudioManager provides access to volume and ringer mode control.
         mAudioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         mExecutorService = Executors.newSingleThreadScheduledExecutor() as ScheduledExecutorService
-
         mNoisyReceiver = NoisyReceiver(this)
-
-        mWifiLock = (getSystemService(Context.WIFI_SERVICE) as WifiManager)
-                .createWifiLock(WifiManager.WIFI_MODE_FULL, "kifio_lock")
+        mWifiLock = (getSystemService(Context.WIFI_SERVICE) as WifiManager).createWifiLock(WifiManager.WIFI_MODE_FULL, "kifio_lock")
+        mMediaPlayer = MediaPlayer()
+        mMediaPlayer!!.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+        mMediaPlayer!!.setOnPreparedListener(this)
+        mMediaPlayer!!.setOnCompletionListener(this)
+        mMediaPlayer!!.setOnErrorListener(this)
+        mMediaPlayer!!.setOnBufferingUpdateListener(this)
+        mMediaPlayer!!.setAudioStreamType(AudioManager.STREAM_MUSIC)
 
         registerReceiver(mNoisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
     }
@@ -87,14 +93,13 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
 
         if (!requestAudioFocus() || intent == null) {
             stopSelf()
-        } else if (intent.action == ACTION_PAUSE) {
-            pause()
-        } else if (intent.action == ACTION_PLAY) {
-            play(intent.getParcelableExtra("media"))
-        } else if (intent.action == ACTION_RESUME) {
-            resume()
-        } else if (intent.action == ACTION_SEEK_TO) {
-            seekTo(intent.getIntExtra("position", 0))
+        } else {
+
+            val metaData: MediaMetadataCompat? = intent.getParcelableExtra(MediaService.EXTRA_MEDIA)
+
+            if (metaData != null) {
+                play(metaData)
+            }
         }
 
         return Service.START_NOT_STICKY
@@ -109,14 +114,15 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
     }
 
     override fun onBind(intent: Intent?): IBinder? {
+        mMaxProgress = intent!!.getIntExtra(EXTRA_MAX_PROGRESS, 1)
         startService(intent)
         return MediaBinder()
     }
 
     override fun onBufferingUpdate(mp: MediaPlayer?, percent: Int) {
-        if (mp!!.isPlaying) {
+        if (mp!!.isPlaying && percent == 100) {
 
-            sendBroadcast(Intent(ACTION_ENABLE_CONTROLS))
+            mUiUpdateHandler!!.obtainMessage(ENABLE_CONTROLS).sendToTarget()
 
             if (mScheduledFuture != null) {
                 mScheduledFuture!!.cancel(true)
@@ -130,7 +136,7 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
     }
 
     override fun onCompletion(mp: MediaPlayer?) {
-        sendBroadcast(Intent(ACTION_DISABLE_CONTROLS))
+        mUiUpdateHandler!!.obtainMessage(DISABLE_CONTROLS).sendToTarget()
         pause()
     }
 
@@ -185,6 +191,10 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
         }
     }
 
+    fun setHandler(handler: Handler) {
+        mUiUpdateHandler = handler
+    }
+
     fun play(currentTrack: MediaMetadataCompat) {
 
         if (mScheduledFuture != null) {
@@ -196,22 +206,11 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
             mCurrentTrack = currentTrack
         }
 
-        mTimeDelta = currentTrack.getLong(MediaMetadataCompat.METADATA_KEY_DURATION) / 255
+        mTimeDelta = currentTrack.getLong(MediaMetadataCompat.METADATA_KEY_DURATION) / mMaxProgress
 
         try {
 
-            if (mMediaPlayer == null) {
-                mMediaPlayer = MediaPlayer()
-                mMediaPlayer!!.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
-                mMediaPlayer!!.setOnPreparedListener(this)
-                mMediaPlayer!!.setOnCompletionListener(this)
-                mMediaPlayer!!.setOnErrorListener(this)
-                mMediaPlayer!!.setOnBufferingUpdateListener(this)
-            } else {
-                mMediaPlayer!!.reset()
-            }
-
-            mMediaPlayer!!.setAudioStreamType(AudioManager.STREAM_MUSIC)
+            mMediaPlayer!!.reset()
             mMediaPlayer!!.setVolume(VOLUME_NORMAL, VOLUME_NORMAL)
 
             if (mCurrentTrack != null) {
@@ -255,10 +254,8 @@ class MediaService : Service(), AudioManager.OnAudioFocusChangeListener,
     }
 
     inner class MediaBinder : Binder() {
-
-        public fun getService() : MediaService {
+        fun getService() : MediaService {
             return this@MediaService
         }
-
     }
 }

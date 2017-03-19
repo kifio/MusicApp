@@ -2,31 +2,26 @@ package music.kifio.activities
 
 import android.content.ComponentName
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
-import android.os.PersistableBundle
 import android.support.annotation.Nullable
 import android.support.v7.app.AppCompatActivity
-import android.support.v7.widget.DividerItemDecoration
-import android.support.v7.widget.LinearLayoutManager
-import android.util.Log
 import android.view.View
 import android.widget.SeekBar
+import android.widget.Toast
 import kotlinx.android.synthetic.main.a_main.*
 import music.kifio.R
 import music.kifio.adapters.TracksAdapter
 import music.kifio.media.MediaService
-import music.kifio.media.MediaService.Companion.ACTION_ENABLE_CONTROLS
-import music.kifio.media.MediaService.Companion.ACTION_DISABLE_CONTROLS
-import music.kifio.media.MediaService.Companion.ACTION_SET_POSITION
-import music.kifio.utils.MusicProvider
 import music.kifio.models.Track
 import music.kifio.network.DataSource
-import music.kifio.receivers.UiChangesReceiver
+import music.kifio.utils.MusicProvider
+import music.kifio.utils.init
 import music.kifio.utils.loadUrl
+import java.util.*
 
 
 /**
@@ -34,11 +29,9 @@ import music.kifio.utils.loadUrl
  */
 
 class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
-        View.OnClickListener, SeekBar.OnSeekBarChangeListener, UiChangesReceiver.OnUiChangeListener, ServiceConnection {
+        View.OnClickListener, SeekBar.OnSeekBarChangeListener, ServiceConnection {
 
     private val mAdapter = TracksAdapter(this, this)
-
-    private var mMediaEventsReceiver: UiChangesReceiver? = null
 
     private var mControlsEnabled = false
 
@@ -48,14 +41,22 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
 
     private var mTrack: Track? = null
 
+    private var mHandler = Handler(Handler.Callback { msg ->
+
+        if (msg!!.what == MediaService.UPDATE_PROGRESS) {
+            progress.progress = msg.obj as Int
+        } else {
+            enableControls(msg.what == MediaService.ENABLE_CONTROLS)
+        }
+
+        true
+    })
+
     override public fun onCreate(@Nullable savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.a_main)
-
-        list.adapter = mAdapter
-        list.layoutManager = LinearLayoutManager(this)
-        list.addItemDecoration(DividerItemDecoration(this, LinearLayoutManager.VERTICAL))
-
+        startService(getMediaServiceIntent())
+        list.init(this, mAdapter)
         resume.setOnClickListener(this)
         pause.setOnClickListener(this)
         logo.setOnClickListener(this)
@@ -65,45 +66,15 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
         DataSource(mAdapter).load(this)
     }
 
-    override fun onSaveInstanceState(outState: Bundle?) {
-        super.onSaveInstanceState(outState)
-        outState!!.putBoolean("controls_enabled", mControlsEnabled)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val mediaEventsFilter = IntentFilter()
-        mediaEventsFilter.addAction(ACTION_DISABLE_CONTROLS)
-        mediaEventsFilter.addAction(ACTION_ENABLE_CONTROLS)
-        mediaEventsFilter.addAction(ACTION_SET_POSITION)
-
-        mMediaEventsReceiver = UiChangesReceiver(this)
-        registerReceiver(mMediaEventsReceiver, mediaEventsFilter)
-    }
-
-    override fun onStop() {
-
-        if (mMediaEventsReceiver != null) {
-            unregisterReceiver(mMediaEventsReceiver)
-            mMediaEventsReceiver = null
-        }
-
-        super.onStop()
-    }
-
     override fun onDestroy() {
         unbindService(this)
         stopService(Intent(this, MediaService::class.java))
         super.onDestroy()
     }
 
-    override fun enableButtons(flag: Boolean) {
-        mControlsEnabled = flag
-        progress.isEnabled = flag
-    }
-
-    override fun progressChange(position: Int) {
-        progress.progress = position
+    private fun enableControls(state: Boolean) {
+        mControlsEnabled = state
+        progress.isEnabled = state
     }
 
     override fun onClick(v: View?) {
@@ -137,13 +108,19 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
 
     override fun onTrackSelected(track: Track) {
         mTrack = track
-        val intent = Intent(this, MediaService::class.java).setAction(MediaService.ACTION_PLAY)
-                .putExtra("media", MusicProvider.instance.getMeta(track))
+
+        val intent = getMediaServiceIntent()
+
+        intent.setAction(MediaService.ACTION_PLAY)
+                .putExtra(MediaService.EXTRA_MEDIA, MusicProvider.instance.getMeta(track))
+                .putExtra(MediaService.EXTRA_MAX_PROGRESS, progress.max)
+
         if (!mBound) {
             bindService(intent, this, BIND_AUTO_CREATE)
         } else if (mMediaService != null) {
             mMediaService!!.play(MusicProvider.instance.getMeta(track))
         }
+
         updateHeader(track)
     }
 
@@ -156,6 +133,10 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
         mBound = true
         mMediaService = (service as MediaService.MediaBinder).getService()
+        mMediaService!!.setHandler(mHandler)
+        Toast.makeText(this, String.format(Locale.getDefault(),
+                getString(R.string.toast_service_bound, service.javaClass.name, this.javaClass.name)),
+                Toast.LENGTH_SHORT).show()
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
@@ -169,6 +150,10 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
 
     override fun onStartTrackingTouch(seekBar: SeekBar?) {
 
+    }
+
+    private fun getMediaServiceIntent(): Intent {
+        return Intent(this, MediaService::class.java)
     }
 
     private fun updateHeader(track: Track) {

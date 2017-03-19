@@ -30,6 +30,10 @@ class MusicProvider private constructor() {
         this.current = current
     }
 
+    fun getCurrent() : Track {
+        return tracks[current]
+    }
+
     fun getMeta(track: Track): MediaMetadataCompat {
         return MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_AUTHOR, track.user.username)
