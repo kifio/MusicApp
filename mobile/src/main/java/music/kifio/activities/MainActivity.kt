@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity(), TracksAdapter.OnSelectTrackListener,
     }
 
     override fun onDestroy() {
-        unbindService(this)
+        if (mBound) unbindService(this)
         stopService(Intent(this, MediaService::class.java))
         super.onDestroy()
     }
